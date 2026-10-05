@@ -29,13 +29,61 @@ Build Windows executable:
   pyinstaller OsuMapHandler.spec --noconfirm
 """
 
+import sys
+
+IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
+
+# Immediate keystroke & foreground snapshot (<20ms at process launch)
+# Runs BEFORE any heavy imports (like requests or urllib3) to guarantee instant Shift detection!
+SHIFT_HELD_AT_LAUNCH = False
+LAUNCH_FOREGROUND_PROC = None
+LAUNCH_WINDOW_TITLE = None
+
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+    import winreg
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        # Check VK_SHIFT (0x10), VK_LSHIFT (0xA0), VK_RSHIFT (0xA1)
+        # 0x8000 = currently down, 0x0001 = pressed since last call
+        SHIFT_HELD_AT_LAUNCH = bool(
+            (user32.GetAsyncKeyState(0x10) & 0x8001)
+            or (user32.GetAsyncKeyState(0xA0) & 0x8001)
+            or (user32.GetAsyncKeyState(0xA1) & 0x8001)
+            or (user32.GetKeyState(0x10) & 0x8000)
+        )
+
+        hwnd = user32.GetForegroundWindow()
+        if hwnd:
+            title_buf = ctypes.create_unicode_buffer(512)
+            user32.GetWindowTextW(hwnd, title_buf, 512)
+            LAUNCH_WINDOW_TITLE = title_buf.value
+
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value:
+                hproc = kernel32.OpenProcess(0x1000, False, pid.value)
+                if hproc:
+                    try:
+                        buf = ctypes.create_unicode_buffer(260)
+                        size = ctypes.c_ulong(len(buf))
+                        if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                            LAUNCH_FOREGROUND_PROC = buf.value.split("\\")[-1].lower()
+                    finally:
+                        kernel32.CloseHandle(hproc)
+    except Exception:
+        pass
+
 import concurrent.futures
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 import socket
 import urllib.parse
@@ -43,14 +91,6 @@ from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
-
-IS_WINDOWS = sys.platform == "win32"
-IS_LINUX = sys.platform.startswith("linux")
-
-if IS_WINDOWS:
-    import ctypes
-    from ctypes import wintypes
-    import winreg
 
 APP_NAME = "OsuMapHandler"
 FRIENDLY_NAME = "osu! Map Handler"
@@ -109,12 +149,16 @@ def msgbox(text: str, title: str = FRIENDLY_NAME, icon: int = 0x40) -> None:
 
 
 def is_shift_held() -> bool:
-    """Check if the Shift key is physically down at invocation time."""
+    """Check if the Shift key was held at click time or is currently down."""
+    if SHIFT_HELD_AT_LAUNCH:
+        return True
     if IS_WINDOWS:
         try:
             user32 = ctypes.windll.user32
             return bool(
-                (user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+                (user32.GetAsyncKeyState(VK_SHIFT) & 0x8001)
+                or (user32.GetAsyncKeyState(0xA0) & 0x8001)
+                or (user32.GetAsyncKeyState(0xA1) & 0x8001)
                 or (user32.GetKeyState(VK_SHIFT) & 0x8000)
             )
         except Exception as e:
@@ -125,6 +169,8 @@ def is_shift_held() -> bool:
 
 def get_foreground_process_info() -> tuple[str | None, str | None]:
     """Returns (process_name, window_title) of the foreground window."""
+    if LAUNCH_FOREGROUND_PROC or LAUNCH_WINDOW_TITLE:
+        return (LAUNCH_FOREGROUND_PROC, LAUNCH_WINDOW_TITLE)
     if IS_WINDOWS:
         try:
             user32 = ctypes.windll.user32
