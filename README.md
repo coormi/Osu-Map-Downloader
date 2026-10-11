@@ -61,12 +61,6 @@ OsuMapHandler.exe --set-browser firefox
 OsuMapHandler.exe --set-browser brave
 OsuMapHandler.exe --set-browser chrome
 
-# Configure an optional reverse caching mirror (e.g. your private VPS)
-OsuMapHandler.exe --set-mirror http://your-vps:8080/d/{set_id}
-
-# Clear custom mirror and revert to standard community mirrors
-OsuMapHandler.exe --clear-mirror
-
 # Re-run setup
 OsuMapHandler.exe --setup
 
