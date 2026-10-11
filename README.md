@@ -24,8 +24,9 @@ Windows and Linux route in-game link clicks through the system's default HTTP/HT
 - The downloaded `.osz` contains full-quality audio (.mp3 at 192–320 kbps), all difficulty files, background image, hitsounds, and storyboard.
 - If you want the full video version for a specific map, hold **Shift** while clicking it in-game.
 
-### Parallel Mirror Racing & Fallback
-- **Concurrent Mirror Racing:** Beatmaps race across high-speed mirrors in parallel with an active speed watchdog, streaming from whichever CDN delivers data fastest.
+### Parallel Mirror Racing & Tiered Fallback
+- **Concurrent Mirror Racing:** Beatmaps race across high-speed no-video CDN mirrors in parallel with an active speed watchdog, streaming from whichever mirror delivers data fastest.
+- **Full-Video Fallback:** If no-video mirrors fail or don't have the map, it seamlessly falls back to full-video mirrors so you still get the map without leaving the lobby.
 - **Automatic Browser Fallback:** If all mirrors fail (e.g. DMCA'd or unindexed beatmap sets), the link automatically opens in your real browser so you can download it directly from osu.ppy.sh.
 
 ---
