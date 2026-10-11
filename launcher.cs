@@ -181,6 +181,9 @@ namespace OsuMapLauncher
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Google\Chrome\Application\chrome.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"BraveSoftware\Brave-Browser\Application\brave.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Opera GX\launcher.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Opera\launcher.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Microsoft\Edge\Application\msedge.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Microsoft\Edge\Application\msedge.exe"),
             };
@@ -200,22 +203,24 @@ namespace OsuMapLauncher
 
                 string rawCmd;
                 string browserExe = ResolveBrowserExe(out rawCmd);
+                string cleanUrl = (url ?? "").Trim('\"', '\'', ' ');
 
                 ProcessStartInfo psi;
                 if (!string.IsNullOrEmpty(browserExe) && File.Exists(browserExe))
                 {
+                    // Direct process launch without quotes avoids Chromium/Brave interpreting URLs as search queries
                     psi = new ProcessStartInfo
                     {
                         FileName = browserExe,
-                        Arguments = "\"" + url + "\"",
-                        UseShellExecute = true
+                        Arguments = cleanUrl,
+                        UseShellExecute = false
                     };
                 }
                 else
                 {
                     psi = new ProcessStartInfo
                     {
-                        FileName = url,
+                        FileName = cleanUrl,
                         UseShellExecute = true
                     };
                 }
@@ -355,7 +360,7 @@ namespace OsuMapLauncher
                 return;
             }
 
-            string first = args[0];
+            string first = (args[0] ?? "").Trim('\"', '\'', ' ');
 
             // CLI options -> attach to parent console and forward to engine
             if (first.StartsWith("-") || first.StartsWith("/"))

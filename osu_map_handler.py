@@ -468,10 +468,10 @@ def get_saved_browser_cmd() -> str | None:
 
 
 def save_browser_cmd(cmd_or_path: str) -> None:
-    cmd = cmd_or_path.strip()
+    cmd = cmd_or_path.strip().strip('"\'')
     if IS_WINDOWS:
-        if not cmd.startswith('"') and Path(cmd).is_file():
-            cmd = f'"{cmd}" "%1"'
+        if Path(cmd).is_file():
+            cmd = f'"{cmd}" %1'
         for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
             try:
                 with winreg.CreateKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
@@ -683,20 +683,22 @@ def force_window_foreground_by_exe(exe_path: str | None, timeout: float = 2.5) -
 
 
 def open_in_real_browser(url: str, bring_to_front: bool = False) -> None:
+    url = url.strip().strip('"\'')
     exe, cmd = resolve_fallback_browser()
     env = os.environ.copy()
     env["MOZ_DISABLE_SAFE_MODE_KEY"] = "1"
 
     try:
         if IS_WINDOWS:
-            if cmd and "%1" in cmd:
-                if '"%1"' in cmd:
-                    full = cmd.replace('"%1"', f'"{url}"')
-                else:
-                    full = cmd.replace('%1', f'"{url}"')
-                subprocess.Popen(full, shell=True, env=env)
-            elif exe and Path(exe).is_file():
+            # Direct process invocation without quotes ensures Chromium/Brave navigates to URL instead of searching
+            if exe and Path(exe).is_file():
                 subprocess.Popen([exe, url], env=env)
+            elif cmd and "%1" in cmd:
+                exe_clean = extract_exe_from_command(cmd)
+                if exe_clean and Path(exe_clean).is_file():
+                    subprocess.Popen([exe_clean, url], env=env)
+                else:
+                    os.startfile(url)
             else:
                 os.startfile(url)
 
@@ -1128,7 +1130,7 @@ def run_setup() -> None:
             non_edge = [p for p in detected_browsers if "msedge.exe" not in p.lower()]
             best_browser = non_edge[0] if non_edge else (detected_browsers[0] if detected_browsers else None)
             if best_browser:
-                fallback_cmd = f'"{best_browser}" "%1"'
+                fallback_cmd = f'"{best_browser}" %1'
 
         hklm = winreg.HKEY_LOCAL_MACHINE
 
@@ -1276,12 +1278,17 @@ def run_uninstall() -> None:
 # ---------------------------------------------------------------------------
 
 def run_handler(url: str, force_browser: bool = False, foreground_proc: str | None = None, window_title: str | None = None) -> None:
+    url = url.strip().strip('"\'')
     if url.lower().startswith("osu-map://"):
         url = "https://" + url[10:]
     elif url.lower().startswith("osu://b/"):
         url = f"https://osu.ppy.sh/b/{url[8:]}"
     elif url.lower().startswith("osu://s/"):
         url = f"https://osu.ppy.sh/s/{url[8:]}"
+    elif url.lower().startswith("osu://dl/"):
+        url = f"https://osu.ppy.sh/d/{url[9:]}"
+    elif url.lower().startswith("osu://d/"):
+        url = f"https://osu.ppy.sh/d/{url[8:]}"
 
     # Non-beatmap URLs (e.g. user profile https://osu.ppy.sh/users/...)
     if not BEATMAP_RE.match(url):
