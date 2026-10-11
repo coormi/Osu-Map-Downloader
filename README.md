@@ -29,11 +29,11 @@ Windows and Linux route in-game link clicks through the system's default HTTP/HT
 ## Installation
 
 ### Windows (10/11)
-1. Download `OsuMapHandler.exe` from [Releases](https://github.com/coormi/Osu-Map-Downloader/releases).
+1. Download `OsuMapHandler-v1.1.0-windows.zip` from [Releases](https://github.com/coormi/Osu-Map-Downloader/releases) and extract the folder.
 2. Run `OsuMapHandler.exe` once to register.
 3. Windows Default Apps settings will open:
    - Set **osu! Map Handler** as default for HTTP/HTTPS (or default Web Browser).
-4. Done. Click any unowned beatmap in an osu! lobby.
+4. Done! Clicking any unowned beatmap in an osu! lobby or chat downloads it immediately.
 
 ### Linux (Arch Linux / Ubuntu / Fedora / SteamOS)
 Requires Python 3.10+ and `requests`.
@@ -50,13 +50,22 @@ python3 osu_map_handler.py --setup
 ## CLI Options
 
 ```bash
-# List detected browsers and current configuration
+# Check current configuration and detected browser / mirrors
+OsuMapHandler.exe --status
+
+# List detected browsers
 OsuMapHandler.exe --list-browsers
 
 # Set a specific fallback browser
-OsuMapHandler.exe --set-browser brave
 OsuMapHandler.exe --set-browser firefox
+OsuMapHandler.exe --set-browser brave
 OsuMapHandler.exe --set-browser chrome
+
+# Configure an optional reverse caching mirror (e.g. your private VPS)
+OsuMapHandler.exe --set-mirror http://your-vps:8080/d/{set_id}
+
+# Clear custom mirror and revert to standard community mirrors
+OsuMapHandler.exe --clear-mirror
 
 # Re-run setup
 OsuMapHandler.exe --setup
@@ -71,9 +80,11 @@ OsuMapHandler.exe --uninstall
 
 ```bash
 pip install requests pyinstaller
-pyinstaller OsuMapHandler.spec --noconfirm
+python build.py
 ```
-Output binary is created at `dist/OsuMapHandler.exe`.
+Output binaries are created in `dist/`:
+- `OsuMapHandler.exe` (Instant native launcher)
+- `OsuMapEngine.exe` (Download & import engine)
 
 ---
 

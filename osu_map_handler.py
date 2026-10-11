@@ -6,8 +6,13 @@ Supports:
 - Linux (Arch Linux, Ubuntu, Fedora, SteamOS, etc.) with Wine, Lutris, Bottles, or osu! lazer.
 
 Features:
-- Parallel Mirror Racing: Pings top mirrors concurrently (Catboy, Beatconnect, Sayobot)
+- Parallel Mirror Racing: Pings top mirrors concurrently (osu.direct, Catboy, Sayobot)
   and streams from the fastest responding server. Eliminates mirror stall timeouts!
+- Multi-Connection Range Acceleration: Pipelined concurrent chunk streaming for large beatmaps.
+- Active Speed Watchdog: Automatically aborts throttled connections (<200 KB/s) within 2.5s
+  and fails over to alternate mirrors instantly.
+- Cross-Process Active Download Lock: Prevents duplicate download races and file collisions
+  when beatmaps are clicked multiple times.
 - 1-Click Beatmap Download: Clicking a beatmap in multiplayer lobby, chat,
   or solo listing automatically downloads and imports the map into osu!
   without leaving the game.
@@ -17,12 +22,15 @@ Features:
   automatically open in your preferred web browser.
 - Universal Browser Support: Works seamlessly with any web browser (Firefox, Chrome,
   Brave, Edge, Opera, Opera GX, Vivaldi, Zen, Floorp, Waterfox, Chromium, etc.).
-- Works out of the box for any user on Windows and Linux.
+- Optional Private Caching Proxy: Supports custom VPS reverse caching mirrors (e.g. Mumbai VPS).
 
 Usage:
   Double-click (or run with no args) -> Run one-time setup & registration
   python osu_map_handler.py --set-browser <name|path> -> Configure fallback browser
   python osu_map_handler.py --list-browsers -> List all detected browsers
+  python osu_map_handler.py --set-mirror <url> -> Configure custom mirror (e.g. http://vps/d/{set_id})
+  python osu_map_handler.py --clear-mirror -> Remove custom mirror
+  python osu_map_handler.py --status -> Check current configuration & paths
   python osu_map_handler.py <url> -> Handle incoming URL from game / OS
 
 Build Windows executable:
@@ -49,12 +57,11 @@ if IS_WINDOWS:
         kernel32 = ctypes.windll.kernel32
 
         # Check VK_SHIFT (0x10), VK_LSHIFT (0xA0), VK_RSHIFT (0xA1)
-        # 0x8000 = currently down, 0x0001 = pressed since last call
+        # 0x8000 = currently physically down
         SHIFT_HELD_AT_LAUNCH = bool(
-            (user32.GetAsyncKeyState(0x10) & 0x8001)
-            or (user32.GetAsyncKeyState(0xA0) & 0x8001)
-            or (user32.GetAsyncKeyState(0xA1) & 0x8001)
-            or (user32.GetKeyState(0x10) & 0x8000)
+            (user32.GetAsyncKeyState(0x10) & 0x8000)
+            or (user32.GetAsyncKeyState(0xA0) & 0x8000)
+            or (user32.GetAsyncKeyState(0xA1) & 0x8000)
         )
 
         hwnd = user32.GetForegroundWindow()
@@ -121,7 +128,7 @@ class FastHTTPAdapter(HTTPAdapter):
         super().init_poolmanager(*args, **kwargs)
 
 BEATMAP_RE = re.compile(
-    r"^https?://(?:osu\.ppy\.sh|old\.ppy\.sh)/(?:beatmapsets|beatmaps|b|s)/.+$",
+    r"^https?://(?:osu\.ppy\.sh|old\.ppy\.sh)/(?:beatmapsets|beatmaps|b|s|d|dl)/.+$",
     re.I,
 )
 
@@ -130,6 +137,12 @@ VK_SHIFT = 0x10
 
 def log(msg: str) -> None:
     try:
+        if LOG_FILE.is_file() and LOG_FILE.stat().st_size > 500_000:
+            try:
+                lines = LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+                LOG_FILE.write_text("\n".join(lines[-1000:]) + "\n", encoding="utf-8")
+            except Exception:
+                pass
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
     except Exception:
@@ -156,10 +169,9 @@ def is_shift_held() -> bool:
         try:
             user32 = ctypes.windll.user32
             return bool(
-                (user32.GetAsyncKeyState(VK_SHIFT) & 0x8001)
-                or (user32.GetAsyncKeyState(0xA0) & 0x8001)
-                or (user32.GetAsyncKeyState(0xA1) & 0x8001)
-                or (user32.GetKeyState(VK_SHIFT) & 0x8000)
+                (user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+                or (user32.GetAsyncKeyState(0xA0) & 0x8000)
+                or (user32.GetAsyncKeyState(0xA1) & 0x8000)
             )
         except Exception as e:
             log(f"is_shift_held failed: {e}")
@@ -480,6 +492,73 @@ def save_browser_cmd(cmd_or_path: str) -> None:
             log(f"save_browser_cmd failed on Linux: {e}")
 
 
+def get_custom_mirror() -> str | None:
+    env_mirror = os.environ.get("OSU_CUSTOM_MIRROR")
+    if env_mirror and env_mirror.strip():
+        return env_mirror.strip()
+    if IS_WINDOWS:
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
+                    val, _ = winreg.QueryValueEx(k, "CustomMirror")
+                    if val and val.strip():
+                        return val.strip()
+            except Exception:
+                pass
+    elif IS_LINUX:
+        if LINUX_CONFIG_FILE.is_file():
+            try:
+                data = json.loads(LINUX_CONFIG_FILE.read_text(encoding="utf-8"))
+                m = data.get("custom_mirror")
+                if m and m.strip():
+                    return m.strip()
+            except Exception:
+                pass
+    return None
+
+
+def save_custom_mirror(mirror_url: str | None) -> None:
+    if mirror_url:
+        mirror_url = mirror_url.strip()
+        if "{set_id}" not in mirror_url:
+            if not mirror_url.endswith("/d") and not mirror_url.endswith("/d/"):
+                mirror_url = mirror_url.rstrip("/") + "/d/{set_id}"
+            else:
+                mirror_url = mirror_url.rstrip("/") + "/{set_id}"
+
+    if IS_WINDOWS:
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.CreateKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
+                    if mirror_url:
+                        winreg.SetValueEx(k, "CustomMirror", 0, winreg.REG_SZ, mirror_url)
+                    else:
+                        try:
+                            winreg.DeleteValue(k, "CustomMirror")
+                        except Exception:
+                            pass
+            except PermissionError:
+                pass
+            except Exception as e:
+                log(f"save_custom_mirror failed for {root}: {e}")
+    elif IS_LINUX:
+        try:
+            LINUX_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if LINUX_CONFIG_FILE.is_file():
+                try:
+                    data = json.loads(LINUX_CONFIG_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            if mirror_url:
+                data["custom_mirror"] = mirror_url.strip()
+            else:
+                data.pop("custom_mirror", None)
+            LINUX_CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            log(f"save_custom_mirror failed on Linux: {e}")
+
+
 def resolve_fallback_browser() -> tuple[str, str | None]:
     saved = get_saved_browser_cmd()
     if saved:
@@ -657,7 +736,10 @@ def extract_set_id(url: str) -> str | None:
     m = re.search(r"beatmapsets/(\d+)", url, re.I)
     if m:
         return m.group(1)
-    m = re.search(r"/s/(\d+)", url, re.I)
+    m = re.search(r"/(?:s|d|dl)/(\d+)", url, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?:nerinyan\.moe|catboy\.best|beatconnect\.io)/(?:d|b)/(\d+)", url, re.I)
     if m:
         return m.group(1)
     return None
@@ -725,19 +807,120 @@ def is_installed(set_id: str, songs_path: Path) -> bool:
     return False
 
 
-def download_osz(set_id: str) -> Path | None:
+def stream_with_watchdog(
+    r: requests.Response,
+    part_file: Path,
+    name: str,
+    min_speed_kb: float = 200.0,
+    check_after_s: float = 2.5,
+    total_size: int | None = None,
+) -> int:
+    """Streams response chunks with an active speed watchdog and stall detection."""
+    downloaded = 0
+    t_stream = time.time()
+    last_chunk_time = time.time()
+
+    with open(part_file, "wb") as f:
+        for chunk in r.iter_content(chunk_size=32768):
+            now = time.time()
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                last_chunk_time = now
+
+            elapsed = now - t_stream
+            if now - last_chunk_time > 4.5:
+                log(f"Speed watchdog: {name} chunk stall (>4.5s without data). Aborting...")
+                raise TimeoutError(f"{name} chunk stall")
+
+            if elapsed >= check_after_s:
+                if total_size and downloaded >= total_size * 0.85:
+                    pass  # Almost complete, let it finish
+                else:
+                    speed_kb = (downloaded / 1024) / elapsed
+                    if speed_kb < min_speed_kb:
+                        log(f"Speed watchdog: {name} throttled ({speed_kb:.1f} KB/s < {min_speed_kb} KB/s after {elapsed:.1f}s). Aborting stream to switch mirror.")
+                        raise TimeoutError(f"{name} throttled at {speed_kb:.1f} KB/s")
+    return downloaded
+
+
+def download_from_stream(
+    r: requests.Response,
+    name: str,
+    part_file: Path,
+    session: requests.Session,
+) -> int:
+    """
+    Downloads from response using multi-stream acceleration when supported,
+    or falls back to fine-grained streaming protected by the speed watchdog.
+    """
+    real_url = r.url
+    accept_ranges = "bytes" in r.headers.get("accept-ranges", "").lower()
+    cl = r.headers.get("content-length")
+    total_size = int(cl) if cl and cl.isdigit() else 0
+
+    if total_size <= 0 and accept_ranges:
+        try:
+            r_probe = session.get(real_url, headers={"Range": "bytes=0-0"}, timeout=2.5)
+            cr = r_probe.headers.get("Content-Range", "")
+            if "/" in cr:
+                total_size = int(cr.split("/")[1])
+        except Exception:
+            pass
+
+    # Pipelined multi-connection acceleration for maps > 3MB with Range support
+    if accept_ranges and total_size > 3 * 1024 * 1024:
+        try:
+            chunk1 = total_size // 3
+            chunk2 = (total_size * 2) // 3
+
+            chunk_bytes = total_size // 3
+            # Dynamic timeout ensuring large files (like 60MB marathons) have proportional time to stream
+            dynamic_timeout = max(15, int(chunk_bytes / (250 * 1024)) + 5)
+
+            def get_range(s, e):
+                h = {"Range": f"bytes={s}-{e}"}
+                resp = session.get(real_url, headers=h, timeout=(3, dynamic_timeout))
+                if resp.status_code == 206:
+                    return resp.content
+                raise ValueError(f"Range returned {resp.status_code}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                f2 = ex.submit(get_range, chunk1, chunk2 - 1)
+                f3 = ex.submit(get_range, chunk2, total_size - 1)
+                data1 = bytearray()
+                for c in r.iter_content(32768):
+                    data1.extend(c)
+                    if len(data1) >= chunk1:
+                        break
+                r.close()
+                d2 = f2.result(timeout=dynamic_timeout)
+                d3 = f3.result(timeout=dynamic_timeout)
+                full = bytes(data1[:chunk1]) + d2 + d3
+                with open(part_file, "wb") as f:
+                    f.write(full)
+                return len(full)
+        except Exception as e:
+            log(f"Multi-stream pipelining on {name} hit {e}. Falling back to standard stream...")
+            try:
+                r = session.get(real_url, stream=True, timeout=(3, 15))
+            except Exception:
+                raise
+
+    return stream_with_watchdog(r, part_file, name, min_speed_kb=200.0, check_after_s=2.5, total_size=total_size)
+
+
+def download_osz(set_id: str, is_update: bool = False) -> Path | None:
     """
     Downloads beatmapset .osz using Optimized Tiered & Hedged Mirror Racing.
-    1. Tier 1: High-Speed Cloud CDN (storage.osu.direct / Cloudflare / AWS S3)
-       - Primary: osu.direct (no-video) -> Fast, high quality audio, stripped video, ~3-5 seconds.
-       - Fallback 1a: osu.direct (full) -> Full mapset if no-video variant is missing.
-    2. Tier 2: Secondary Community Mirrors (concurrent race pool)
-       - Catboy (no-video): https://catboy.best/d/{set_id}?noVideo=1
-       - Sayobot (no-video): https://dl.sayobot.cn/beatmaps/download/novideo/{set_id}
-    3. Tier 3: Last Resort Fallback (concurrent race pool)
-       - Catboy (full): https://catboy.best/d/{set_id}
-       - Sayobot (full): https://dl.sayobot.cn/beatmaps/download/full/{set_id}
-    Uses 512KB stream buffers, TCP_NODELAY, and 1MB socket receive buffers.
+    Features:
+    - Tier 0: Custom VPS Mirror (if configured, e.g. Mumbai reverse caching proxy).
+    - Tier 1: High-Speed No-Video CDN (Nerinyan + osu.direct + Catboy + Sayobot race pool).
+    - Tier 2: Secondary Mirrored Fallback (Nerinyan full + osu.direct full + Catboy full + Sayobot full).
+    - Tier 3: Last Resort Fallback (Sayobot full).
+    - Multi-Connection Range Pipelining for ultra-fast transfers (>3MB).
+    - Active Speed Watchdog (<200 KB/s aborted within 2.5s to switch mirrors).
+    - Process-isolated PID part files to eliminate WinError 32 collisions.
     """
     session = requests.Session()
     adapter = FastHTTPAdapter()
@@ -745,38 +928,87 @@ def download_osz(set_id: str) -> Path | None:
     session.mount("http://", adapter)
     session.headers.update({"User-Agent": USER_AGENT})
 
-    tier1_mirrors = [
-        ("osu.direct (no-video)", f"https://osu.direct/d/{set_id}?noVideo=1"),
-        ("osu.direct", f"https://osu.direct/d/{set_id}"),
-    ]
+    custom = get_custom_mirror()
+    tier0 = []
+    if custom:
+        c_url = custom
+        if "{set_id}" not in c_url:
+            if not c_url.endswith("/d") and not c_url.endswith("/d/"):
+                c_url = c_url.rstrip("/") + "/d/{set_id}"
+            else:
+                c_url = c_url.rstrip("/") + "/{set_id}"
+        tier0 = [("Custom VPS Mirror", c_url.replace("{set_id}", str(set_id)))]
 
-    tier2_mirrors = [
+    tier1 = [
+        ("Nerinyan (no-video)", f"https://api.nerinyan.moe/d/{set_id}?nv=1"),
+        ("osu.direct (no-video)", f"https://osu.direct/d/{set_id}?noVideo=1"),
         ("Catboy (no-video)", f"https://catboy.best/d/{set_id}?noVideo=1"),
         ("Sayobot (no-video)", f"https://dl.sayobot.cn/beatmaps/download/novideo/{set_id}"),
     ]
 
-    tier3_mirrors = [
+    tier2 = [
+        ("Nerinyan (full)", f"https://api.nerinyan.moe/d/{set_id}"),
+        ("osu.direct (full)", f"https://osu.direct/d/{set_id}"),
         ("Catboy (full)", f"https://catboy.best/d/{set_id}"),
         ("Sayobot (full)", f"https://dl.sayobot.cn/beatmaps/download/full/{set_id}"),
     ]
 
-    winner = None
+    tier3 = [
+        ("Sayobot (full)", f"https://dl.sayobot.cn/beatmaps/download/full/{set_id}"),
+    ]
 
-    # Step 1: Probe Tier 1 high-speed Cloud CDN
-    for name, url in tier1_mirrors:
+    def try_mirror(name: str, r: requests.Response) -> Path | None:
+        cd = r.headers.get("content-disposition", "")
+        m = re.search(r'filename[*]?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.I)
+        fname = m.group(1).strip() if m else f"{set_id}.osz"
+        fname = urllib.parse.unquote(fname)
+        fname = re.sub(r'[\\/*?:"<>|]', "", fname)
+        if not fname.endswith(".osz"):
+            fname += ".osz"
+
+        out = DOWNLOAD_DIR / fname
+        part_file = DOWNLOAD_DIR / f"{fname}.{os.getpid()}.part"
+        t0 = time.time()
         try:
-            r = session.get(url, stream=True, timeout=(2.5, 20))
-            if r.status_code == 200 and "html" not in r.headers.get("content-type", "").lower():
-                winner = (name, r)
-                break
-            r.close()
-        except Exception:
-            pass
+            downloaded = download_from_stream(r, name, part_file, session)
+            if downloaded < 1024:
+                return None
+
+            try:
+                part_file.replace(out)
+            except OSError:
+                if out.exists():
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                part_file.rename(out)
+
+            elapsed = time.time() - t0
+            speed_mb = (downloaded / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+            log(f"Successfully downloaded {fname} ({downloaded} bytes in {elapsed:.2f}s @ {speed_mb:.2f} MB/s) from {name}")
+            return out
+        except Exception as e:
+            log(f"Failed streaming from {name}: {e}")
+            return None
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
+            if part_file.exists():
+                try:
+                    part_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def probe(m):
         name, url = m
+        req_headers = {}
+        if is_update and "Custom VPS" in name:
+            req_headers["Cache-Control"] = "no-cache"
         try:
-            r = session.get(url, stream=True, timeout=(3, 20))
+            r = session.get(url, stream=True, timeout=(2.5, 15), headers=req_headers)
             if r.status_code == 200 and "html" not in r.headers.get("content-type", "").lower():
                 return (name, r)
             r.close()
@@ -784,76 +1016,111 @@ def download_osz(set_id: str) -> Path | None:
             pass
         return None
 
-    # Step 2: If Tier 1 failed or 404'd, race Tier 2 concurrently
-    if not winner:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tier2_mirrors)) as ex:
-            futures = {ex.submit(probe, m): m for m in tier2_mirrors}
-            for fut in concurrent.futures.as_completed(futures):
-                res = fut.result()
-                if res:
-                    winner = res
+    # Step 0: Try Custom VPS mirror if configured (unless updating, where we race VPS + fresh mirrors together)
+    if not is_update:
+        for name, url in tier0:
+            res = probe((name, url))
+            if res:
+                out = try_mirror(*res)
+                if out:
+                    return out
+
+    # Race mirrors concurrently (includes VPS if updating so fastest fresh mirror wins)
+    active_tier1 = (tier0 + tier1) if is_update else tier1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(active_tier1)) as ex:
+        futures = {ex.submit(probe, m): m for m in active_tier1}
+        for fut in concurrent.futures.as_completed(futures):
+            res = fut.result()
+            if res:
+                out = try_mirror(*res)
+                if out:
                     for f in futures:
                         f.cancel()
-                    break
+                        if f.done() and not f.cancelled():
+                            try:
+                                other = f.result()
+                                if other and other != res:
+                                    other[1].close()
+                            except Exception:
+                                pass
+                    return out
 
-    # Step 3: Last resort Tier 3 full video fallback
-    if not winner:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tier3_mirrors)) as ex:
-            futures = {ex.submit(probe, m): m for m in tier3_mirrors}
-            for fut in concurrent.futures.as_completed(futures):
-                res = fut.result()
-                if res:
-                    winner = res
+    # Step 2: Race Tier 2 mirrors concurrently if Tier 1 failed
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tier2)) as ex:
+        futures = {ex.submit(probe, m): m for m in tier2}
+        for fut in concurrent.futures.as_completed(futures):
+            res = fut.result()
+            if res:
+                out = try_mirror(*res)
+                if out:
                     for f in futures:
                         f.cancel()
-                    break
+                        if f.done() and not f.cancelled():
+                            try:
+                                other = f.result()
+                                if other and other != res:
+                                    other[1].close()
+                            except Exception:
+                                pass
+                    return out
 
-    if not winner:
-        log(f"All mirrors failed for set {set_id}")
-        return None
+    # Step 3: Tier 3 fallback
+    for m in tier3:
+        res = probe(m)
+        if res:
+            out = try_mirror(*res)
+            if out:
+                return out
 
-    name, r = winner
-    log(f"Download stream established with {name} for set {set_id}")
+    log(f"All mirrors failed for set {set_id}")
+    return None
 
+
+def cleanup_temp_dir(songs_path: Path | None = None) -> None:
+    """Removes leftover .osz and .part files from the temporary download directory.
+    
+    1. Removes any .osz file whose beatmapset is already installed in osu!
+    2. Removes any .part or lock file older than 5 minutes.
+    3. Removes any .osz file older than 30 minutes.
+    """
     try:
-        fname = f"{set_id}.osz"
-        cd = r.headers.get("content-disposition", "")
-        m = re.search(r'filename[*]?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.I)
-        if m:
-            fname = m.group(1).strip()
-        fname = urllib.parse.unquote(fname)
-        fname = re.sub(r'[\\/*?:"<>|]', "", fname)
-        if not fname.endswith(".osz"):
-            fname += ".osz"
-
-        out = DOWNLOAD_DIR / fname
-        part_file = DOWNLOAD_DIR / f"{fname}.part"
-
-        downloaded = 0
-        t0 = time.time()
-        # 512KB chunk buffer for maximum throughput over high-latency TCP
-        with open(part_file, "wb") as f:
-            for chunk in r.iter_content(chunk_size=524288):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-
-        if downloaded < 1024:
-            part_file.unlink(missing_ok=True)
-            return None
-
-        # Atomic rename
-        if out.exists():
-            out.unlink()
-        part_file.rename(out)
-
-        elapsed = time.time() - t0
-        speed_mb = (downloaded / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-        log(f"Successfully downloaded {fname} ({downloaded} bytes in {elapsed:.2f}s @ {speed_mb:.2f} MB/s) from {name}")
-        return out
+        if not DOWNLOAD_DIR.is_dir():
+            return
+        now = time.time()
+        for f in DOWNLOAD_DIR.iterdir():
+            if not f.is_file():
+                continue
+            name = f.name.lower()
+            try:
+                age = now - f.stat().st_mtime
+            except Exception:
+                continue
+            # Old part files or lock files
+            if name.endswith(".part") or name.endswith(".lock"):
+                if age > 300:
+                    try:
+                        f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                continue
+            # .osz files
+            if name.endswith(".osz"):
+                m = re.match(r"^(\d+)", f.name)
+                if m and songs_path:
+                    set_id = m.group(1)
+                    if is_installed(set_id, songs_path):
+                        try:
+                            f.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        continue
+                if age > 1800:
+                    try:
+                        f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
     except Exception as e:
-        log(f"Error streaming from {name}: {e}")
-        return None
+        log(f"cleanup_temp_dir failed: {e}")
 
 
 def import_beatmap_into_osu(osz_path: Path, songs_path: Path) -> bool:
@@ -914,13 +1181,20 @@ def run_setup() -> None:
             return
 
         if getattr(sys, "frozen", False):
-            self_path = str(Path(sys.executable).resolve())
+            self_dir = Path(sys.executable).resolve().parent
+            launcher = self_dir / "OsuMapHandler.exe"
+            self_path = str(launcher if launcher.is_file() else Path(sys.executable).resolve())
             command = f'"{self_path}" "%1"'
         else:
             py_exe = str(Path(sys.executable).resolve())
             script = str(Path(__file__).resolve())
-            command = f'"{py_exe}" "{script}" "%1"'
-            self_path = py_exe
+            launcher = Path(__file__).resolve().parent / "dist" / "OsuMapHandler.exe"
+            if launcher.is_file():
+                command = f'"{launcher}" "%1"'
+                self_path = str(launcher)
+            else:
+                command = f'"{py_exe}" "{script}" "%1"'
+                self_path = py_exe
 
         fallback_cmd = current_browser_cmd or get_saved_browser_cmd()
         if not fallback_cmd:
@@ -1109,21 +1383,61 @@ def run_handler(url: str, force_browser: bool = False, foreground_proc: str | No
         open_in_real_browser(url, bring_to_front=True)
         return
 
-    # Check if already installed
     songs_path = find_osu_songs_path()
-    if is_installed(set_id, songs_path):
-        log(f"Beatmap set {set_id} already installed -> Staying in game")
-        return
+    is_update = is_installed(set_id, songs_path)
+    if is_update:
+        log(f"Beatmap set {set_id} is already in Songs folder -> Proceeding to download latest update / refresh")
 
-    # Parallel racing download
-    osz = download_osz(set_id)
-    if not osz:
-        log(f"All mirrors failed for set {set_id} -> Forwarding to browser as fallback")
-        open_in_real_browser(url, bring_to_front=True)
-        return
+    # Cleanup stale temporary files
+    cleanup_temp_dir(songs_path)
 
-    # Import into osu!
-    import_beatmap_into_osu(osz, songs_path)
+    # Active Download Lock: Prevent duplicate downloads & file collisions on re-clicks
+    lock_file = DOWNLOAD_DIR / f"{set_id}.download.lock"
+    if lock_file.exists():
+        try:
+            lock_mtime = lock_file.stat().st_mtime
+            age = time.time() - lock_mtime
+            if age < 45.0:
+                log(f"Map set {set_id} is already being downloaded by another process (lock age {age:.1f}s). Waiting for completion...")
+                wait_start = time.time()
+                while time.time() - wait_start < 12.0:
+                    time.sleep(0.3)
+                    if not lock_file.exists():
+                        time.sleep(0.5)
+                        break
+        except Exception as e:
+            log(f"Lock check exception: {e}")
+
+    try:
+        lock_file.write_text(f"{os.getpid()}:{time.time()}", encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        # Tiered parallel racing download (passes is_update so latest fresh version is fetched)
+        osz = download_osz(set_id, is_update=is_update)
+        if not osz:
+            log(f"All mirrors failed for set {set_id} -> Forwarding to browser as fallback")
+            open_in_real_browser(url, bring_to_front=True)
+            return
+
+        # Import into osu!
+        if import_beatmap_into_osu(osz, songs_path):
+            # Allow osu! a short window to read and extract the .osz into Songs, then delete the temp copy
+            for _ in range(8):
+                time.sleep(0.5)
+                try:
+                    osz.unlink(missing_ok=True)
+                    log(f"Cleaned up temp .osz for {set_id} after successful osu! import")
+                    break
+                except OSError:
+                    pass
+    finally:
+        try:
+            lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        cleanup_temp_dir(songs_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1135,6 +1449,17 @@ def main() -> None:
     foreground_proc, window_title = get_foreground_process_info()
 
     args = sys.argv[1:]
+
+    # Support flags forwarded by native launcher or CLI
+    if "--shift" in args:
+        shift_held = True
+        args.remove("--shift")
+    if "--force-browser" in args:
+        shift_held = True
+        args.remove("--force-browser")
+    if "--from-osu" in args:
+        foreground_proc = "osu!.exe"
+        args.remove("--from-osu")
 
     if not args:
         run_setup()
@@ -1180,6 +1505,27 @@ def main() -> None:
             print("Installed browsers:")
             for b in installed:
                 print(f"  - {b}")
+        return
+
+    if first_arg in ("--set-mirror", "-m"):
+        if len(args) < 2:
+            print("Usage: --set-mirror <url_template> (e.g. http://my-vps:8080/d/{set_id})")
+            return
+        mirror_url = args[1].strip()
+        save_custom_mirror(mirror_url)
+        print(f"Successfully set custom mirror to: {mirror_url}")
+        return
+
+    if first_arg in ("--clear-mirror",):
+        save_custom_mirror(None)
+        print("Cleared custom mirror. Now using standard high-speed mirrors.")
+        return
+
+    if first_arg in ("--status",):
+        print("osu! Map Handler Status:")
+        print(f"  Fallback Browser : {get_saved_browser_cmd() or 'Auto-detect'}")
+        print(f"  Custom Mirror    : {get_custom_mirror() or 'None (using standard mirrors)'}")
+        print(f"  osu! Songs Path  : {find_osu_songs_path()}")
         return
 
     if first_arg in ("--help", "-h", "/?"):

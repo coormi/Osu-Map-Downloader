@@ -3,18 +3,33 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
 # PyInstaller build and distribution
 build/
 dist/
 
-# Logs and temporary downloads
+# Logs and temporary files
 *.log
+*log.txt
 *.part
 *.osz
+*.lock
 scratch/
+
+# C# / .NET build artifacts
+*.pdb
+*.obj
+bin/
+obj/
 
 # OS and Editor artifacts
 .vscode/
 .idea/
+.DS_Store
 Thumbs.db
 Desktop.ini
