@@ -29,7 +29,7 @@ Windows and Linux route in-game link clicks through the system's default HTTP/HT
 ## Installation
 
 ### Windows (10/11)
-1. Download `OsuMapHandler-v1.1.0-windows.zip` from [Releases](https://github.com/coormi/Osu-Map-Downloader/releases) and extract the folder.
+1. Download **`OsuMapHandler.exe`** from [Releases](https://github.com/coormi/Osu-Map-Downloader/releases).
 2. Run `OsuMapHandler.exe` once to register.
 3. Windows Default Apps settings will open:
    - Set **osu! Map Handler** as default for HTTP/HTTPS (or default Web Browser).

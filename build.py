@@ -71,6 +71,7 @@ def main():
         sys.exit(1)
 
     launcher_exe = dist_dir / "OsuMapHandler.exe"
+    engine_exe = dist_dir / "OsuMapEngine.exe"
     csc_cmd = [
         str(csc_path),
         "/nologo",
@@ -81,6 +82,8 @@ def main():
     ]
     if icon_file.is_file():
         csc_cmd.insert(4, f"/win32icon:{icon_file}")
+    if engine_exe.is_file():
+        csc_cmd.append(f"/resource:{engine_exe},OsuMapEngine.exe")
 
     try:
         subprocess.run(csc_cmd, check=True, cwd=root)

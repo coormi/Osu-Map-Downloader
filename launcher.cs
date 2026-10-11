@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using Microsoft.Win32;
 
 namespace OsuMapLauncher
@@ -241,6 +242,41 @@ namespace OsuMapLauncher
             string distDir = Path.Combine(dir, "dist");
             engine = Path.Combine(distDir, "OsuMapEngine.exe");
             if (File.Exists(engine)) return engine;
+
+            // Self-contained standalone mode: extract embedded engine to %LOCALAPPDATA%\OsuMapHandler\
+            try
+            {
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string targetDir = Path.Combine(appData, "OsuMapHandler");
+                string targetEngine = Path.Combine(targetDir, "OsuMapEngine.exe");
+
+                var asm = Assembly.GetExecutingAssembly();
+                using (var stream = asm.GetManifestResourceStream("OsuMapEngine.exe"))
+                {
+                    if (stream != null)
+                    {
+                        if (!Directory.Exists(targetDir))
+                            Directory.CreateDirectory(targetDir);
+
+                        if (File.Exists(targetEngine))
+                        {
+                            var fi = new FileInfo(targetEngine);
+                            if (fi.Length == stream.Length)
+                                return targetEngine;
+                        }
+
+                        using (var fs = new FileStream(targetEngine, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            stream.CopyTo(fs);
+                        }
+                        return targetEngine;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("Embedded engine extraction failed: " + ex.Message);
+            }
 
             return null;
         }
