@@ -22,14 +22,11 @@ Features:
   automatically open in your preferred web browser.
 - Universal Browser Support: Works seamlessly with any web browser (Firefox, Chrome,
   Brave, Edge, Opera, Opera GX, Vivaldi, Zen, Floorp, Waterfox, Chromium, etc.).
-- Optional Private Caching Proxy: Supports custom VPS reverse caching mirrors (e.g. Mumbai VPS).
 
 Usage:
   Double-click (or run with no args) -> Run one-time setup & registration
   python osu_map_handler.py --set-browser <name|path> -> Configure fallback browser
   python osu_map_handler.py --list-browsers -> List all detected browsers
-  python osu_map_handler.py --set-mirror <url> -> Configure custom mirror (e.g. http://vps/d/{set_id})
-  python osu_map_handler.py --clear-mirror -> Remove custom mirror
   python osu_map_handler.py --status -> Check current configuration & paths
   python osu_map_handler.py <url> -> Handle incoming URL from game / OS
 
@@ -492,73 +489,6 @@ def save_browser_cmd(cmd_or_path: str) -> None:
             log(f"save_browser_cmd failed on Linux: {e}")
 
 
-def get_custom_mirror() -> str | None:
-    env_mirror = os.environ.get("OSU_CUSTOM_MIRROR")
-    if env_mirror and env_mirror.strip():
-        return env_mirror.strip()
-    if IS_WINDOWS:
-        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                with winreg.OpenKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
-                    val, _ = winreg.QueryValueEx(k, "CustomMirror")
-                    if val and val.strip():
-                        return val.strip()
-            except Exception:
-                pass
-    elif IS_LINUX:
-        if LINUX_CONFIG_FILE.is_file():
-            try:
-                data = json.loads(LINUX_CONFIG_FILE.read_text(encoding="utf-8"))
-                m = data.get("custom_mirror")
-                if m and m.strip():
-                    return m.strip()
-            except Exception:
-                pass
-    return None
-
-
-def save_custom_mirror(mirror_url: str | None) -> None:
-    if mirror_url:
-        mirror_url = mirror_url.strip()
-        if "{set_id}" not in mirror_url:
-            if not mirror_url.endswith("/d") and not mirror_url.endswith("/d/"):
-                mirror_url = mirror_url.rstrip("/") + "/d/{set_id}"
-            else:
-                mirror_url = mirror_url.rstrip("/") + "/{set_id}"
-
-    if IS_WINDOWS:
-        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                with winreg.CreateKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
-                    if mirror_url:
-                        winreg.SetValueEx(k, "CustomMirror", 0, winreg.REG_SZ, mirror_url)
-                    else:
-                        try:
-                            winreg.DeleteValue(k, "CustomMirror")
-                        except Exception:
-                            pass
-            except PermissionError:
-                pass
-            except Exception as e:
-                log(f"save_custom_mirror failed for {root}: {e}")
-    elif IS_LINUX:
-        try:
-            LINUX_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            data = {}
-            if LINUX_CONFIG_FILE.is_file():
-                try:
-                    data = json.loads(LINUX_CONFIG_FILE.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
-            if mirror_url:
-                data["custom_mirror"] = mirror_url.strip()
-            else:
-                data.pop("custom_mirror", None)
-            LINUX_CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except Exception as e:
-            log(f"save_custom_mirror failed on Linux: {e}")
-
-
 def resolve_fallback_browser() -> tuple[str, str | None]:
     saved = get_saved_browser_cmd()
     if saved:
@@ -912,12 +842,10 @@ def download_from_stream(
 
 def download_osz(set_id: str, is_update: bool = False) -> Path | None:
     """
-    Downloads beatmapset .osz using Optimized Tiered & Hedged Mirror Racing.
+    Downloads beatmapset .osz using Parallel Mirror Racing.
     Features:
-    - Tier 0: Custom VPS Mirror (if configured, e.g. Mumbai reverse caching proxy).
-    - Tier 1: High-Speed No-Video CDN (Nerinyan + osu.direct + Catboy + Sayobot race pool).
-    - Tier 2: Secondary Mirrored Fallback (Nerinyan full + osu.direct full + Catboy full + Sayobot full).
-    - Tier 3: Last Resort Fallback (Sayobot full).
+    - Tier 1: High-Speed No-Video CDN + BeatConnect (Nerinyan, osu.direct, Catboy, BeatConnect, Sayobot).
+    - Tier 2: Secondary Full Video Fallback Pool.
     - Multi-Connection Range Pipelining for ultra-fast transfers (>3MB).
     - Active Speed Watchdog (<200 KB/s aborted within 2.5s to switch mirrors).
     - Process-isolated PID part files to eliminate WinError 32 collisions.
@@ -928,21 +856,11 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
     session.mount("http://", adapter)
     session.headers.update({"User-Agent": USER_AGENT})
 
-    custom = get_custom_mirror()
-    tier0 = []
-    if custom:
-        c_url = custom
-        if "{set_id}" not in c_url:
-            if not c_url.endswith("/d") and not c_url.endswith("/d/"):
-                c_url = c_url.rstrip("/") + "/d/{set_id}"
-            else:
-                c_url = c_url.rstrip("/") + "/{set_id}"
-        tier0 = [("Custom VPS Mirror", c_url.replace("{set_id}", str(set_id)))]
-
     tier1 = [
         ("Nerinyan (no-video)", f"https://api.nerinyan.moe/d/{set_id}?nv=1"),
         ("osu.direct (no-video)", f"https://osu.direct/d/{set_id}?noVideo=1"),
         ("Catboy (no-video)", f"https://catboy.best/d/{set_id}?noVideo=1"),
+        ("BeatConnect", f"https://beatconnect.io/b/{set_id}"),
         ("Sayobot (no-video)", f"https://dl.sayobot.cn/beatmaps/download/novideo/{set_id}"),
     ]
 
@@ -950,10 +868,7 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
         ("Nerinyan (full)", f"https://api.nerinyan.moe/d/{set_id}"),
         ("osu.direct (full)", f"https://osu.direct/d/{set_id}"),
         ("Catboy (full)", f"https://catboy.best/d/{set_id}"),
-        ("Sayobot (full)", f"https://dl.sayobot.cn/beatmaps/download/full/{set_id}"),
-    ]
-
-    tier3 = [
+        ("BeatConnect", f"https://beatconnect.io/b/{set_id}"),
         ("Sayobot (full)", f"https://dl.sayobot.cn/beatmaps/download/full/{set_id}"),
     ]
 
@@ -1004,11 +919,8 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
 
     def probe(m):
         name, url = m
-        req_headers = {}
-        if is_update and "Custom VPS" in name:
-            req_headers["Cache-Control"] = "no-cache"
         try:
-            r = session.get(url, stream=True, timeout=(2.5, 15), headers=req_headers)
+            r = session.get(url, stream=True, timeout=(2.5, 15))
             if r.status_code == 200 and "html" not in r.headers.get("content-type", "").lower():
                 return (name, r)
             r.close()
@@ -1016,19 +928,9 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
             pass
         return None
 
-    # Step 0: Try Custom VPS mirror if configured (unless updating, where we race VPS + fresh mirrors together)
-    if not is_update:
-        for name, url in tier0:
-            res = probe((name, url))
-            if res:
-                out = try_mirror(*res)
-                if out:
-                    return out
-
-    # Race mirrors concurrently (includes VPS if updating so fastest fresh mirror wins)
-    active_tier1 = (tier0 + tier1) if is_update else tier1
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(active_tier1)) as ex:
-        futures = {ex.submit(probe, m): m for m in active_tier1}
+    # Step 1: Race Tier 1 mirrors concurrently
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tier1)) as ex:
+        futures = {ex.submit(probe, m): m for m in tier1}
         for fut in concurrent.futures.as_completed(futures):
             res = fut.result()
             if res:
@@ -1063,14 +965,6 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
                             except Exception:
                                 pass
                     return out
-
-    # Step 3: Tier 3 fallback
-    for m in tier3:
-        res = probe(m)
-        if res:
-            out = try_mirror(*res)
-            if out:
-                return out
 
     log(f"All mirrors failed for set {set_id}")
     return None
@@ -1422,16 +1316,7 @@ def run_handler(url: str, force_browser: bool = False, foreground_proc: str | No
             return
 
         # Import into osu!
-        if import_beatmap_into_osu(osz, songs_path):
-            # Allow osu! a short window to read and extract the .osz into Songs, then delete the temp copy
-            for _ in range(8):
-                time.sleep(0.5)
-                try:
-                    osz.unlink(missing_ok=True)
-                    log(f"Cleaned up temp .osz for {set_id} after successful osu! import")
-                    break
-                except OSError:
-                    pass
+        import_beatmap_into_osu(osz, songs_path)
     finally:
         try:
             lock_file.unlink(missing_ok=True)
@@ -1507,24 +1392,9 @@ def main() -> None:
                 print(f"  - {b}")
         return
 
-    if first_arg in ("--set-mirror", "-m"):
-        if len(args) < 2:
-            print("Usage: --set-mirror <url_template> (e.g. http://my-vps:8080/d/{set_id})")
-            return
-        mirror_url = args[1].strip()
-        save_custom_mirror(mirror_url)
-        print(f"Successfully set custom mirror to: {mirror_url}")
-        return
-
-    if first_arg in ("--clear-mirror",):
-        save_custom_mirror(None)
-        print("Cleared custom mirror. Now using standard high-speed mirrors.")
-        return
-
     if first_arg in ("--status",):
         print("osu! Map Handler Status:")
         print(f"  Fallback Browser : {get_saved_browser_cmd() or 'Auto-detect'}")
-        print(f"  Custom Mirror    : {get_custom_mirror() or 'None (using standard mirrors)'}")
         print(f"  osu! Songs Path  : {find_osu_songs_path()}")
         return
 
