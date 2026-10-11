@@ -61,6 +61,10 @@ OsuMapHandler.exe --set-browser firefox
 OsuMapHandler.exe --set-browser brave
 OsuMapHandler.exe --set-browser chrome
 
+# Optional: Configure a custom mirror (e.g. personal VPS caching proxy)
+OsuMapHandler.exe --set-mirror http://my-vps:8080/d/{set_id}
+OsuMapHandler.exe --clear-mirror
+
 # Re-run setup
 OsuMapHandler.exe --setup
 
@@ -76,9 +80,8 @@ OsuMapHandler.exe --uninstall
 pip install requests pyinstaller
 python build.py
 ```
-Output binaries are created in `dist/`:
-- `OsuMapHandler.exe` (Instant native launcher)
-- `OsuMapEngine.exe` (Download & import engine)
+Output binary is created in `dist/`:
+- `OsuMapHandler.exe` (Self-contained standalone executable)
 
 ---
 

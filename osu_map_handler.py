@@ -489,6 +489,70 @@ def save_browser_cmd(cmd_or_path: str) -> None:
             log(f"save_browser_cmd failed on Linux: {e}")
 
 
+def get_custom_mirror() -> str | None:
+    if IS_WINDOWS:
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
+                    val, _ = winreg.QueryValueEx(k, "CustomMirror")
+                    if val and val.strip():
+                        return val.strip()
+            except Exception:
+                pass
+    elif IS_LINUX:
+        if LINUX_CONFIG_FILE.is_file():
+            try:
+                data = json.loads(LINUX_CONFIG_FILE.read_text(encoding="utf-8"))
+                val = data.get("custom_mirror")
+                if val and val.strip():
+                    return val.strip()
+            except Exception:
+                pass
+    return None
+
+
+def save_custom_mirror(mirror_url: str | None) -> None:
+    if mirror_url:
+        mirror_url = mirror_url.strip()
+        if "{set_id}" not in mirror_url:
+            if not mirror_url.endswith("/d") and not mirror_url.endswith("/d/"):
+                mirror_url = mirror_url.rstrip("/") + "/d/{set_id}"
+            else:
+                mirror_url = mirror_url.rstrip("/") + "/{set_id}"
+
+    if IS_WINDOWS:
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.CreateKey(root, rf"SOFTWARE\{APP_NAME}\Config") as k:
+                    if mirror_url:
+                        winreg.SetValueEx(k, "CustomMirror", 0, winreg.REG_SZ, mirror_url)
+                    else:
+                        try:
+                            winreg.DeleteValue(k, "CustomMirror")
+                        except Exception:
+                            pass
+            except PermissionError:
+                pass
+            except Exception as e:
+                log(f"save_custom_mirror failed for {root}: {e}")
+    elif IS_LINUX:
+        try:
+            LINUX_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if LINUX_CONFIG_FILE.is_file():
+                try:
+                    data = json.loads(LINUX_CONFIG_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            if mirror_url:
+                data["custom_mirror"] = mirror_url.strip()
+            else:
+                data.pop("custom_mirror", None)
+            LINUX_CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            log(f"save_custom_mirror failed on Linux: {e}")
+
+
 def resolve_fallback_browser() -> tuple[str, str | None]:
     saved = get_saved_browser_cmd()
     if saved:
@@ -741,8 +805,8 @@ def stream_with_watchdog(
     r: requests.Response,
     part_file: Path,
     name: str,
-    min_speed_kb: float = 200.0,
-    check_after_s: float = 2.5,
+    min_speed_kb: float = 350.0,
+    check_after_s: float = 1.2,
     total_size: int | None = None,
 ) -> int:
     """Streams response chunks with an active speed watchdog and stall detection."""
@@ -751,7 +815,7 @@ def stream_with_watchdog(
     last_chunk_time = time.time()
 
     with open(part_file, "wb") as f:
-        for chunk in r.iter_content(chunk_size=32768):
+        for chunk in r.iter_content(chunk_size=65536):
             now = time.time()
             if chunk:
                 f.write(chunk)
@@ -759,8 +823,8 @@ def stream_with_watchdog(
                 last_chunk_time = now
 
             elapsed = now - t_stream
-            if now - last_chunk_time > 4.5:
-                log(f"Speed watchdog: {name} chunk stall (>4.5s without data). Aborting...")
+            if now - last_chunk_time > 2.5:
+                log(f"Speed watchdog: {name} chunk stall (>2.5s without data). Aborting...")
                 raise TimeoutError(f"{name} chunk stall")
 
             if elapsed >= check_after_s:
@@ -780,74 +844,20 @@ def download_from_stream(
     part_file: Path,
     session: requests.Session,
 ) -> int:
-    """
-    Downloads from response using multi-stream acceleration when supported,
-    or falls back to fine-grained streaming protected by the speed watchdog.
-    """
-    real_url = r.url
-    accept_ranges = "bytes" in r.headers.get("accept-ranges", "").lower()
+    """Downloads directly using stream_with_watchdog with optimal socket buffer."""
     cl = r.headers.get("content-length")
-    total_size = int(cl) if cl and cl.isdigit() else 0
-
-    if total_size <= 0 and accept_ranges:
-        try:
-            r_probe = session.get(real_url, headers={"Range": "bytes=0-0"}, timeout=2.5)
-            cr = r_probe.headers.get("Content-Range", "")
-            if "/" in cr:
-                total_size = int(cr.split("/")[1])
-        except Exception:
-            pass
-
-    # Pipelined multi-connection acceleration for maps > 3MB with Range support
-    if accept_ranges and total_size > 3 * 1024 * 1024:
-        try:
-            chunk1 = total_size // 3
-            chunk2 = (total_size * 2) // 3
-
-            chunk_bytes = total_size // 3
-            # Dynamic timeout ensuring large files (like 60MB marathons) have proportional time to stream
-            dynamic_timeout = max(15, int(chunk_bytes / (250 * 1024)) + 5)
-
-            def get_range(s, e):
-                h = {"Range": f"bytes={s}-{e}"}
-                resp = session.get(real_url, headers=h, timeout=(3, dynamic_timeout))
-                if resp.status_code == 206:
-                    return resp.content
-                raise ValueError(f"Range returned {resp.status_code}")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                f2 = ex.submit(get_range, chunk1, chunk2 - 1)
-                f3 = ex.submit(get_range, chunk2, total_size - 1)
-                data1 = bytearray()
-                for c in r.iter_content(32768):
-                    data1.extend(c)
-                    if len(data1) >= chunk1:
-                        break
-                r.close()
-                d2 = f2.result(timeout=dynamic_timeout)
-                d3 = f3.result(timeout=dynamic_timeout)
-                full = bytes(data1[:chunk1]) + d2 + d3
-                with open(part_file, "wb") as f:
-                    f.write(full)
-                return len(full)
-        except Exception as e:
-            log(f"Multi-stream pipelining on {name} hit {e}. Falling back to standard stream...")
-            try:
-                r = session.get(real_url, stream=True, timeout=(3, 15))
-            except Exception:
-                raise
-
-    return stream_with_watchdog(r, part_file, name, min_speed_kb=200.0, check_after_s=2.5, total_size=total_size)
+    total_size = int(cl) if cl and cl.isdigit() else None
+    return stream_with_watchdog(r, part_file, name, min_speed_kb=350.0, check_after_s=1.2, total_size=total_size)
 
 
 def download_osz(set_id: str, is_update: bool = False) -> Path | None:
     """
     Downloads beatmapset .osz using Parallel Mirror Racing.
     Features:
-    - Tier 1: High-Speed No-Video CDN + BeatConnect (Nerinyan, osu.direct, Catboy, BeatConnect, Sayobot).
-    - Tier 2: Secondary Full Video Fallback Pool.
-    - Multi-Connection Range Pipelining for ultra-fast transfers (>3MB).
-    - Active Speed Watchdog (<200 KB/s aborted within 2.5s to switch mirrors).
+    - Tier 0: Custom VPS / Private Mirror (if configured via --set-mirror).
+    - Tier 1: High-Speed No-Video CDN pool (osu.direct, Nerinyan, Catboy).
+    - Tier 2: Secondary / Archival Fallback Pool (osu.direct full, Nerinyan full, Catboy full, Sayobot).
+    - Active Speed Watchdog (<350 KB/s aborted within 1.2s to switch mirrors).
     - Process-isolated PID part files to eliminate WinError 32 collisions.
     """
     session = requests.Session()
@@ -856,19 +866,28 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
     session.mount("http://", adapter)
     session.headers.update({"User-Agent": USER_AGENT})
 
+    custom = get_custom_mirror()
+    tier0 = []
+    if custom:
+        c_url = custom
+        if "{set_id}" not in c_url:
+            if not c_url.endswith("/d") and not c_url.endswith("/d/"):
+                c_url = c_url.rstrip("/") + "/d/{set_id}"
+            else:
+                c_url = c_url.rstrip("/") + "/{set_id}"
+        tier0 = [("Custom Mirror", c_url.replace("{set_id}", str(set_id)))]
+
     tier1 = [
-        ("Nerinyan (no-video)", f"https://api.nerinyan.moe/d/{set_id}?nv=1"),
         ("osu.direct (no-video)", f"https://osu.direct/d/{set_id}?noVideo=1"),
+        ("Nerinyan (no-video)", f"https://api.nerinyan.moe/d/{set_id}?nv=1"),
         ("Catboy (no-video)", f"https://catboy.best/d/{set_id}?noVideo=1"),
-        ("BeatConnect", f"https://beatconnect.io/b/{set_id}"),
-        ("Sayobot (no-video)", f"https://dl.sayobot.cn/beatmaps/download/novideo/{set_id}"),
     ]
 
     tier2 = [
-        ("Nerinyan (full)", f"https://api.nerinyan.moe/d/{set_id}"),
         ("osu.direct (full)", f"https://osu.direct/d/{set_id}"),
+        ("Nerinyan (full)", f"https://api.nerinyan.moe/d/{set_id}"),
         ("Catboy (full)", f"https://catboy.best/d/{set_id}"),
-        ("BeatConnect", f"https://beatconnect.io/b/{set_id}"),
+        ("Sayobot (no-video)", f"https://dl.sayobot.cn/beatmaps/download/novideo/{set_id}"),
         ("Sayobot (full)", f"https://dl.sayobot.cn/beatmaps/download/full/{set_id}"),
     ]
 
@@ -919,8 +938,11 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
 
     def probe(m):
         name, url = m
+        req_headers = {}
+        if is_update and "Custom" in name:
+            req_headers["Cache-Control"] = "no-cache"
         try:
-            r = session.get(url, stream=True, timeout=(2.5, 15))
+            r = session.get(url, stream=True, timeout=(2.5, 15), headers=req_headers)
             if r.status_code == 200 and "html" not in r.headers.get("content-type", "").lower():
                 return (name, r)
             r.close()
@@ -928,9 +950,19 @@ def download_osz(set_id: str, is_update: bool = False) -> Path | None:
             pass
         return None
 
-    # Step 1: Race Tier 1 mirrors concurrently
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tier1)) as ex:
-        futures = {ex.submit(probe, m): m for m in tier1}
+    # Step 0: Try Custom mirror first if configured (unless updating, where we race it with fresh mirrors)
+    if not is_update and tier0:
+        for name, url in tier0:
+            res = probe((name, url))
+            if res:
+                out = try_mirror(*res)
+                if out:
+                    return out
+
+    # Step 1: Race Tier 1 mirrors concurrently (includes Custom mirror if updating)
+    active_tier1 = (tier0 + tier1) if is_update and tier0 else tier1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(active_tier1)) as ex:
+        futures = {ex.submit(probe, m): m for m in active_tier1}
         for fut in concurrent.futures.as_completed(futures):
             res = fut.result()
             if res:
@@ -1392,9 +1424,24 @@ def main() -> None:
                 print(f"  - {b}")
         return
 
+    if first_arg in ("--set-mirror", "-m"):
+        if len(args) < 2:
+            print("Usage: --set-mirror <url_template> (e.g. http://my-vps:8080/d/{set_id})")
+            return
+        mirror_url = args[1].strip()
+        save_custom_mirror(mirror_url)
+        print(f"Successfully set custom mirror to: {mirror_url}")
+        return
+
+    if first_arg in ("--clear-mirror",):
+        save_custom_mirror(None)
+        print("Cleared custom mirror. Now using standard high-speed mirrors.")
+        return
+
     if first_arg in ("--status",):
         print("osu! Map Handler Status:")
         print(f"  Fallback Browser : {get_saved_browser_cmd() or 'Auto-detect'}")
+        print(f"  Custom Mirror    : {get_custom_mirror() or 'None (using standard mirrors)'}")
         print(f"  osu! Songs Path  : {find_osu_songs_path()}")
         return
 

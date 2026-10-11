@@ -87,14 +87,15 @@ def main():
 
     try:
         subprocess.run(csc_cmd, check=True, cwd=root)
+        if engine_exe.is_file():
+            engine_exe.unlink(missing_ok=True)
     except subprocess.CalledProcessError as e:
         print(f"\nERROR: C# compilation failed with exit code {e.returncode}.")
         print("Tip: Ensure OsuMapHandler.exe is not currently running.")
         sys.exit(e.returncode)
 
-    print(f"\nBuild complete! Executables ready in {dist_dir}:")
-    print(f"  - {launcher_exe.name} (Instant native launcher)")
-    print(f"  - {(dist_dir / 'OsuMapEngine.exe').name} (Engine)")
+    print(f"\nBuild complete! Standalone executable ready in {dist_dir}:")
+    print(f"  - {launcher_exe.name} (Self-contained standalone executable)")
 
 if __name__ == "__main__":
     main()
